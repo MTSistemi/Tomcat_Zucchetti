@@ -1,0 +1,28 @@
+[Unit]
+    Description=tomcat
+    After=network.target
+    After=tomcat_b.service
+    [Service]
+    Type=forking
+    User=zucchetti
+    Group=zucchetti
+    
+    PermissionsStartOnly=true
+    LimitNOFILE=10000
+    Environment=CATALINA_PID=/zucchetti/infinity/tomcat_c/temp/tomcat.pid
+    Environment=JAVA_HOME=/zucchetti/infinity/java
+    Environment=CATALINA_HOME=/zucchetti/infinity/tomcat_c
+    Environment=CATALINA_BASE=/zucchetti/infinity/tomcat_c
+    
+    # JAVA_OPTS #
+    Environment="JAVA_OPTS=-Duser.timezone=Europe/Rome -Dfile.encoding=ISO-8859-15 -Djava.awt.headless=true -Duser.language=it -Dsun.zip.disableMemoryMapping=true -Xms3072m -Xmx4096m -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/zucchetti/infinity/tomcat_c/logs -XX:MaxMetaspaceSize=1024m -XX:MetaspaceSize=768m -XX:ReservedCodeCacheSize=480m -Xss2m -XX:MaxJavaStackTraceDepth=50000 -XX:+UseG1GC -XX:MaxGCPauseMillis=500 -XX:+UseStringDeduplication -XX:+DisableExplicitGC -XX:+PrintAdaptiveSizePolicy -XX:+PrintGCDateStamps -XX:+PrintGCDetails -XX:+PrintGCApplicationStoppedTime -Xloggc:/zucchetti/infinity/tomcat_c/logs/%t.log -XX:ErrorFile=/zucchetti/infinity/tomcat_c/logs/java_error%p.log"
+    
+    ExecStartPre=/usr/bin/rm -rf /zucchetti/infinity/tomcat_c/work/Catalina
+    ExecStartPre=/usr/bin/chmod 755 -R /zucchetti/infinity/tomcat_c/
+    ExecStartPre=/usr/bin/chown -R zucchetti /zucchetti/infinity/tomcat_c/
+    ExecStart=/bin/sh /zucchetti/infinity/tomcat_c/bin/startup.sh
+    ExecStop=/bin/kill -15 $MAINPID
+    TimeoutStartSec=900
+    
+    [Install]
+    WantedBy=multi-user.target
