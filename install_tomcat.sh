@@ -1,237 +1,288 @@
 #!/bin/bash
-# Script per l'installazione di Java e Tomcat con file di configurazione per AGO e HR
-# Autore: Mattia Tadini
-# Nome del file: install_tomcat.sh
-# Revisione: 1.00
+set -Eeuo pipefail
 
-# Variabili
-ZUCC_DIR="/zucchetti/infinity"
-API_URL="https://api.github.com/repos/adoptium/temurin8-binaries/releases/latest"
-TOMCAT_VERSION="9.0.97"
-CONF_URL="https://dl.poloinformatico.it/assistenza/Scripts/conf"
-LIB_URL="https://dl.poloinformatico.it/assistenza/Scripts/lib"
+# Unattended Tomcat 9 installer for Zucchetti environments.
+# CLIENT_PROFILE=polo installs under /zucchetti/infinity.
+# CLIENT_PROFILE=hrsud installs under /opt/infinity.
+
+DEFAULT_CLIENT_PROFILE="polo"
+DEFAULT_TOMCAT_START_INDEX="1"
+DEFAULT_TOMCAT_COUNT="1"
+
+CLIENT_PROFILE="${CLIENT_PROFILE:-$DEFAULT_CLIENT_PROFILE}"
+UNATTENDED="${UNATTENDED:-0}"
+TIMEZONE="${TIMEZONE:-Europe/Rome}"
+ENABLE_ROOT_SSH_PASSWORD="${ENABLE_ROOT_SSH_PASSWORD:-1}"
+CREATE_DOCUMENTI="${CREATE_DOCUMENTI:-1}"
+TOMCAT_COUNT="${TOMCAT_COUNT:-$DEFAULT_TOMCAT_COUNT}"
+TOMCAT_START_INDEX="${TOMCAT_START_INDEX:-$DEFAULT_TOMCAT_START_INDEX}"
+RUN_OS_UPGRADE="${RUN_OS_UPGRADE:-1}"
+CONF_URL="${CONF_URL:-https://dl.poloinformatico.it/assistenza/Scripts/conf}"
+LIB_URL="${LIB_URL:-https://dl.poloinformatico.it/assistenza/Scripts/lib}"
 LOGROTATE_DIR="/etc/logrotate.d"
 SYSTEMD_DIR="/etc/systemd/system"
-TMP_DIR="/tmp"  # Directory temporanea
+TMP_DIR="/tmp"
 PSQL_LIB="postgresql-42.7.3.jar"
 MSSQL_LIB="mssql-jdbc-12.8.1.jre8.jar"
-LOG_FILE="/root/tomcat_installation.log"  # Percorso del file di log
+LOG_FILE="/root/tomcat_installation.log"
+JAVA_API_URL="https://api.github.com/repos/adoptium/temurin8-binaries/releases/latest"
+TOMCAT_VERSION="${TOMCAT_VERSION:-}"
+TOMCAT_TGZ=""
 
-# Funzione per il controllo degli errori
-check_error() {
-  if [ $? -ne 0 ]; then
-    echo "Errore durante l'esecuzione: $1" | tee -a "$LOG_FILE"
-    cleanup
-    exit 1
-  fi
-}
-
-# Funzione di pulizia in caso di interruzione o alla fine
-cleanup() {
-  echo "Esecuzione interrotta o completata. Pulizia in corso..." | tee -a "$LOG_FILE"
-  
-  # Rimuovi i file scaricati e non necessari
-  [ -f "$TMP_DIR/OpenJDK8-${formatted_version}.tar.gz" ] && rm -f "$TMP_DIR/OpenJDK8-${formatted_version}.tar.gz"
-  [ -f "$TMP_DIR/apache-tomcat-$TOMCAT_VERSION.tar.gz" ] && rm -f "$TMP_DIR/apache-tomcat-$TOMCAT_VERSION.tar.gz"
-  
-  echo "Pulizia completata." | tee -a "$LOG_FILE"
-}
-
-# Creazione Utente zucchetti solo se non esiste già
-if id "zucchetti" &>/dev/null; then
-    echo "L'utente 'zucchetti' esiste già. Procedo..." | tee -a "$LOG_FILE"
-else
-    useradd -r -s /sbin/nologin zucchetti
-    check_error "Aggiunta Utente zucchetti fallita"
-fi
-
-# Modifica del valore di PermitRootLogin
-sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-check_error "Modifica di PermitRootLogin fallita"
-
-# Imposta trap per gestire i segnali di interruzione e terminazione
-trap cleanup INT TERM EXIT  # 'EXIT' per eseguire la pulizia alla fine
-
-# Funzione per controllare la versione di Java installata
-check_java_version() {
-  # Cerca una directory con nome jdk8u<version>-b<build> nella cartella /zucchetti/infinity
-  local existing_version=$(ls "$ZUCC_DIR" | grep -oP 'jdk8u\d+-b\d+' | sort -rV | head -n 1)
-  
-  if [ -z "$existing_version" ]; then
-    echo "Nessuna versione di Java trovata in $ZUCC_DIR. Procedo all'installazione." | tee -a "$LOG_FILE"
-    return 2  # Nessuna versione di Java trovata
-  fi
-
-  echo "Versione attuale di Java installata: $existing_version" | tee -a "$LOG_FILE"
-  local existing_version_number=$(echo "$existing_version" | grep -oP '\d+-b\d+')
-  echo "Versione numerica estratta: $existing_version_number" | tee -a "$LOG_FILE"
-
-  # Confronta con la versione più recente disponibile su GitHub
-  local response=$(curl -s "$API_URL")
-  local latest_version=$(echo $response | jq -r '.tag_name')
-  local clean_version=$(echo "$latest_version" | grep -oP 'jdk8u\d+-b\d+')
-
-  if [[ "$clean_version" > "$existing_version_number" ]]; then
-    echo "È disponibile una versione più recente di Java: $clean_version" | tee -a "$LOG_FILE"
-    return 0  # Nuova versione disponibile
-  else
-    echo "La versione di Java è aggiornata." | tee -a "$LOG_FILE"
-    return 1  # Nessun aggiornamento necessario
-  fi
-}
-
-# Funzione per installare Java
-install_java() {
-  local response=$(curl -s "$API_URL")
-  local latest_version=$(echo $response | jq -r '.tag_name')
-  local clean_version=$(echo "$latest_version" | grep -oP 'jdk8u\d+-b\d+')
-  local formatted_version=$(echo "$clean_version" | sed 's/jdk8u//;s/-//')
-
-  # Formattazione corretta del numero di versione per il download
-  local download_url="https://github.com/adoptium/temurin8-binaries/releases/download/$clean_version/OpenJDK8U-jdk_x64_linux_hotspot_8u${formatted_version}.tar.gz"
-
-  wget -O "$TMP_DIR/OpenJDK8-8u${formatted_version}.tar.gz" "$download_url"
-  check_error "Errore nel download di OpenJDK"
-  
-  tar xvfz "$TMP_DIR/OpenJDK8-8u${formatted_version}.tar.gz" -C "$ZUCC_DIR"
-  ln -s "$ZUCC_DIR/$clean_version" "$ZUCC_DIR/java"
-  check_error "Errore nell'installazione di Java"
-}
-# Chiede all'utente quale servizio Tomcat installare
-read -p "Quale servizio Tomcat desideri installare? (tomcat_a, tomcat_b, tomcat_c): " TOMCAT_SERVICE
-case $TOMCAT_SERVICE in
-    tomcat_a)
-        TOMCAT_DIR="$ZUCC_DIR/tomcat_a"
-        SERVER_FILE="server_a.xml"
-        ;;
-    tomcat_b)
-        TOMCAT_DIR="$ZUCC_DIR/tomcat_b"
-        SERVER_FILE="server_b.xml"
-        ;;
-    tomcat_c)
-        TOMCAT_DIR="$ZUCC_DIR/tomcat_c"
-        SERVER_FILE="server_c.xml"
-        ;;
-    *)
-        echo "Servizio non valido. Uscita." | tee -a "$LOG_FILE"
-        exit 1
-        ;;
+case "$CLIENT_PROFILE" in
+  polo) ZUCC_DIR="${ZUCC_DIR:-/zucchetti/infinity}" ;;
+  hrsud) ZUCC_DIR="${ZUCC_DIR:-/opt/infinity}" ;;
+  *) echo "CLIENT_PROFILE non valido: $CLIENT_PROFILE" >&2; exit 1 ;;
 esac
+ZUCC_DIR="${ZUCC_DIR%/}"
 
-LOGROTATE_CONF="$LOGROTATE_DIR/$TOMCAT_SERVICE"
+log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
+fail() { log "ERRORE: $*"; exit 1; }
 
+cleanup() {
+  [ -n "${TOMCAT_TGZ:-}" ] && [ -f "$TOMCAT_TGZ" ] && rm -f "$TOMCAT_TGZ" || true
+}
+trap cleanup EXIT
 
-# Aggiornamento del sistema operativo
-
-apt update && apt upgrade -y && apt dist-upgrade -y
-
-check_error "Aggiornamento del sistema operativo fallito"
-
-
-
-# Installazione dei pacchetti richiesti
-
-apt install curl net-tools wget gnupg2 sudo rsync apt-transport-https ca-certificates software-properties-common locate wget gnupg2 libncurses5-dev libsasl2-dev libssl-dev jq -y
-
-check_error "Installazione dei pacchetti fallita"
-
-# Aggiunta Repository
-apt-add-repository contrib non-free -y
-
-apt update && apt install fontconfig ttf-mscorefonts-installer -y
-
-# Installazione ZeroTier
-curl -s https://install.zerotier.com | sudo bash
-
-# Creazione della directory per Tomcat
-
-mkdir -p "$TOMCAT_DIR"
-
-cd "$ZUCC_DIR"
-# Funzione per scaricare le librerie JDBC
-download_libs() {
-  echo "Scaricamento delle librerie JDBC..." | tee -a "$LOG_FILE"
-  wget -O "$TOMCAT_DIR/lib/$PSQL_LIB" "$LIB_URL/$PSQL_LIB"
-  check_error "Errore nel download di $PSQL_LIB"
-  wget -O "$TOMCAT_DIR/lib/$MSSQL_LIB" "$LIB_URL/$MSSQL_LIB"
-  check_error "Errore nel download di $MSSQL_LIB"
+require_root() {
+  [ "$EUID" -eq 0 ] || fail "Lo script deve essere eseguito come root"
 }
 
-# Verifica la versione di Java attualmente installata e confronta con l'ultima versione disponibile
-check_java_version
-java_status=$?
+configure_timezone_and_ssh() {
+  log "Configuro timezone $TIMEZONE e accesso SSH root/password"
+  if [ -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
+    ln -snf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+    echo "$TIMEZONE" > /etc/timezone
+    timedatectl set-timezone "$TIMEZONE" >/dev/null 2>&1 || true
+  fi
+  if [ "$ENABLE_ROOT_SSH_PASSWORD" = "1" ] && [ -f /etc/ssh/sshd_config ]; then
+    grep -Eq '^[#[:space:]]*PermitRootLogin[[:space:]]+' /etc/ssh/sshd_config \
+      && sed -ri 's|^[#[:space:]]*PermitRootLogin[[:space:]]+.*|PermitRootLogin yes|' /etc/ssh/sshd_config \
+      || echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+    grep -Eq '^[#[:space:]]*PasswordAuthentication[[:space:]]+' /etc/ssh/sshd_config \
+      && sed -ri 's|^[#[:space:]]*PasswordAuthentication[[:space:]]+.*|PasswordAuthentication yes|' /etc/ssh/sshd_config \
+      || echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config
+    systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
+    systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
+  fi
+}
 
-if [ "$java_status" -eq 2 ]; then
-  # Se non trova nessuna versione di Java, installa la nuova versione
-  install_java
-elif [ "$java_status" -eq 0 ]; then
-  echo "Aggiornamento di Java necessario. Rimuovo la vecchia versione e installo la nuova." | tee -a "$LOG_FILE"
-  
-  # Rimuove la vecchia versione di Java
-  existing_java_dir=$(ls "$ZUCC_DIR" | grep -oP 'jdk8u\d+-b\d+')
-  rm -rf "$ZUCC_DIR/$existing_java_dir"
-  rm -f "$ZUCC_DIR/java"
-  
-  # Installazione nuova versione di Java
-  install_java
-fi
+bootstrap_packages() {
+  export DEBIAN_FRONTEND=noninteractive
+  log "Aggiorno pacchetti base"
+  apt update -y
+  if [ "$RUN_OS_UPGRADE" = "1" ]; then
+    apt upgrade -y
+    apt dist-upgrade -y
+  fi
+  apt install -y curl net-tools wget gnupg2 sudo rsync apt-transport-https ca-certificates software-properties-common locate libncurses5-dev libsasl2-dev libssl-dev jq cron tzdata openssh-server fontconfig
+  apt-add-repository contrib non-free -y >/dev/null 2>&1 || true
+  apt update -y
+  echo 'msttcorefonts msttcorefonts/accepted-mscorefonts-eula select true' | debconf-set-selections >/dev/null 2>&1 || true
+  apt install -y ttf-mscorefonts-installer >/dev/null 2>&1 || true
+}
 
-# Scarica e installa Tomcat
-wget https://archive.apache.org/dist/tomcat/tomcat-9/v$TOMCAT_VERSION/bin/apache-tomcat-$TOMCAT_VERSION.tar.gz -P "$TMP_DIR/"
-check_error "Errore nel download di Tomcat"
-tar zxvf "$TMP_DIR/apache-tomcat-$TOMCAT_VERSION.tar.gz" --strip-components=1 -C "$TOMCAT_DIR/"
-check_error "Errore nell'estrazione di Tomcat"
+ensure_user_and_dirs() {
+  if ! id zucchetti >/dev/null 2>&1; then
+    useradd -r -s /sbin/nologin zucchetti
+  fi
+  mkdir -p "$ZUCC_DIR"
+  if [ "$CREATE_DOCUMENTI" = "1" ]; then
+    mkdir -p "$ZUCC_DIR/Documenti"
+    chown -R zucchetti:zucchetti "$ZUCC_DIR/Documenti"
+    chmod 755 "$ZUCC_DIR/Documenti"
+  fi
+}
 
-# Ripristina le webapps se erano state salvate
-if [ -d "$TOMCAT_DIR/webapps_backup" ]; then
-  mv "$TOMCAT_DIR/webapps_backup" "$TOMCAT_DIR/webapps"
-  echo "Webapps ripristinate." | tee -a "$LOG_FILE"
-fi
+get_latest_java_tag() {
+  local tag
+  tag=$(curl -fsSL "$JAVA_API_URL" | jq -r '.tag_name // empty' | grep -oE 'jdk8u[0-9]+-b[0-9]+' || true)
+  [ -n "$tag" ] || fail "Impossibile rilevare ultima release Temurin 8"
+  echo "$tag"
+}
 
-# Scarica i file di configurazione
-cd "$TOMCAT_DIR/conf/"
-for file in context.xml tomcat-users.xml catalina.properties; do
-  wget -O $file "$CONF_URL/$file"
-  check_error "Errore nel download di $file"
-done
+java_asset_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo "x64" ;;
+    aarch64|arm64) echo "aarch64" ;;
+    *) fail "Architettura Java non supportata: $(uname -m)" ;;
+  esac
+}
 
-# Scarica il file di configurazione del server corretto
-wget -O server.xml "$CONF_URL/$SERVER_FILE"
-check_error "Errore nel download di $SERVER_FILE"
+ensure_java() {
+  local tag arch build asset url out
+  tag=$(get_latest_java_tag)
+  if [ -x "$ZUCC_DIR/$tag/bin/java" ]; then
+    ln -sfn "$ZUCC_DIR/$tag" "$ZUCC_DIR/java"
+    log "Java gia aggiornato: $tag"
+    return
+  fi
+  arch=$(java_asset_arch)
+  build=$(echo "$tag" | sed -E 's/^jdk8u([0-9]+)-b([0-9]+)$/\1b\2/')
+  asset="OpenJDK8U-jdk_${arch}_linux_hotspot_8u${build}.tar.gz"
+  url="https://github.com/adoptium/temurin8-binaries/releases/download/${tag}/${asset}"
+  out="$TMP_DIR/$asset"
+  log "Scarico Java $tag"
+  wget -O "$out" "$url"
+  tar xzf "$out" -C "$ZUCC_DIR"
+  ln -sfn "$ZUCC_DIR/$tag" "$ZUCC_DIR/java"
+  rm -f "$out"
+}
 
-# Scarica le librerie JDBC
-download_libs
+get_latest_tomcat_version() {
+  local version
+  version=$(curl -fsSL 'https://dlcdn.apache.org/tomcat/tomcat-9/' | grep -oE 'v9\.0\.[0-9]+' | tr -d v | sort -V | tail -n 1 || true)
+  if [ -z "$version" ]; then
+    version=$(curl -fsSL 'https://archive.apache.org/dist/tomcat/tomcat-9/' | grep -oE 'v9\.0\.[0-9]+' | tr -d v | sort -V | tail -n 1 || true)
+  fi
+  echo "${version:-9.0.97}"
+}
 
-# Imposta proprietario e permessi
-chown -R zucchetti:zucchetti "$TOMCAT_DIR"
-chmod -R 755 "$TOMCAT_DIR"
+download_tomcat() {
+  TOMCAT_VERSION="${TOMCAT_VERSION:-$(get_latest_tomcat_version)}"
+  TOMCAT_TGZ="$TMP_DIR/apache-tomcat-$TOMCAT_VERSION.tar.gz"
+  if [ -f "$TOMCAT_TGZ" ]; then
+    return
+  fi
+  log "Scarico Tomcat $TOMCAT_VERSION"
+  wget -O "$TOMCAT_TGZ" "https://dlcdn.apache.org/tomcat/tomcat-9/v$TOMCAT_VERSION/bin/apache-tomcat-$TOMCAT_VERSION.tar.gz" \
+    || wget -O "$TOMCAT_TGZ" "https://archive.apache.org/dist/tomcat/tomcat-9/v$TOMCAT_VERSION/bin/apache-tomcat-$TOMCAT_VERSION.tar.gz"
+}
 
-# Scarica e abilita il servizio Tomcat selezionato
-wget -O "$SYSTEMD_DIR/$TOMCAT_SERVICE.service" "$CONF_URL/$TOMCAT_SERVICE.service"
-check_error "Errore nel download del file $TOMCAT_SERVICE.service"
+tomcat_service_name() {
+  local index="$1"
+  [ "$index" -ge 1 ] && [ "$index" -le 26 ] || fail "Indice Tomcat non valido: $index"
+  local letters=(a b c d e f g h i j k l m n o p q r s t u v w x y z)
+  echo "tomcat_${letters[$((index - 1))]}"
+}
 
-systemctl daemon-reload
-systemctl enable $TOMCAT_SERVICE
-check_error "Errore nell'abilitazione del servizio"
+configure_server_ports() {
+  local file="$1" index="$2"
+  local http_port=$((8080 + index - 1))
+  local https_port=$((8443 + index - 1))
+  local ajp_port=$((8009 + index - 1))
+  sed -i "s/port=\"8080\"/port=\"$http_port\"/g" "$file"
+  sed -i "s/port=\"8443\"/port=\"$https_port\"/g" "$file"
+  sed -i "s/port=\"8009\"/port=\"$ajp_port\"/g" "$file"
+}
 
-# Avvia il servizio Tomcat
-systemctl start $TOMCAT_SERVICE
-check_error "Errore nell'avvio di Tomcat"
+write_systemd_service() {
+  local service="$1" tomcat_dir="$2" index="$3"
+  local after="network.target"
+  if [ "$index" -gt 1 ]; then
+    after="$after $(tomcat_service_name $((index - 1))).service"
+  fi
+  cat > "$SYSTEMD_DIR/$service.service" <<EOF
+[Unit]
+Description=$service
+After=$after
 
-# Configura il logrotate
-cat > "$LOGROTATE_CONF" <<EOF
-$TOMCAT_DIR/logs/catalina.out {
+[Service]
+Type=forking
+User=zucchetti
+Group=zucchetti
+PermissionsStartOnly=true
+LimitNOFILE=10000
+Environment=CATALINA_PID=$tomcat_dir/temp/tomcat.pid
+Environment=JAVA_HOME=$ZUCC_DIR/java
+Environment=CATALINA_HOME=$tomcat_dir
+Environment=CATALINA_BASE=$tomcat_dir
+Environment="JAVA_OPTS=-Duser.timezone=$TIMEZONE -Dfile.encoding=ISO-8859-15 -Djava.awt.headless=true -Duser.language=it -Dsun.zip.disableMemoryMapping=true -Xms3072m -Xmx4096m -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=$tomcat_dir/logs -XX:MaxMetaspaceSize=1024m -XX:MetaspaceSize=768m -XX:ReservedCodeCacheSize=480m -Xss2m -XX:MaxJavaStackTraceDepth=50000 -XX:+UseG1GC -XX:MaxGCPauseMillis=500 -XX:+UseStringDeduplication -XX:+DisableExplicitGC -Xloggc:$tomcat_dir/logs/gc.log -XX:ErrorFile=$tomcat_dir/logs/java_error%p.log"
+ExecStartPre=/usr/bin/rm -rf $tomcat_dir/work/Catalina
+ExecStartPre=/usr/bin/chmod 755 -R $tomcat_dir/
+ExecStartPre=/usr/bin/chown -R zucchetti:zucchetti $tomcat_dir/
+ExecStartPre=/usr/bin/mkdir -p $ZUCC_DIR/Documenti
+ExecStartPre=/usr/bin/chmod 755 -R $ZUCC_DIR/Documenti/
+ExecStartPre=/usr/bin/chown -R zucchetti:zucchetti $ZUCC_DIR/Documenti/
+ExecStart=/bin/sh $tomcat_dir/bin/startup.sh
+ExecStop=/bin/kill -15 \$MAINPID
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+ensure_restart_cron() {
+  local service="$1" index="$2"
+  local total_minutes=$(((index - 1) * 10))
+  local hour=$((1 + total_minutes / 60))
+  local minute=$((total_minutes % 60))
+  local line="$minute $hour * * * root systemctl restart $service"
+  grep -Fqx "$line" /etc/crontab || echo "$line" >> /etc/crontab
+}
+
+write_logrotate() {
+  local service="$1" tomcat_dir="$2"
+  cat > "$LOGROTATE_DIR/$service" <<EOF
+$tomcat_dir/logs/catalina.out {
     rotate 30
     daily
     missingok
     sharedscripts
     compress
     prerotate
-        systemctl stop $TOMCAT_SERVICE || true
+        systemctl stop $service || true
     endscript
     postrotate
-        systemctl start $TOMCAT_SERVICE || true
+        systemctl start $service || true
     endscript
 }
 EOF
-echo "Installazione completata con successo!" | tee -a "$LOG_FILE"
+}
+
+download_libs() {
+  local tomcat_dir="$1"
+  mkdir -p "$tomcat_dir/lib"
+  wget -O "$tomcat_dir/lib/$PSQL_LIB" "$LIB_URL/$PSQL_LIB"
+  wget -O "$tomcat_dir/lib/$MSSQL_LIB" "$LIB_URL/$MSSQL_LIB"
+}
+
+install_tomcat_instance() {
+  local index="$1"
+  local service tomcat_dir
+  service=$(tomcat_service_name "$index")
+  tomcat_dir="$ZUCC_DIR/$service"
+  log "Installo $service in $tomcat_dir"
+  systemctl stop "$service" >/dev/null 2>&1 || true
+  mkdir -p "$tomcat_dir"
+  tar zxf "$TOMCAT_TGZ" --strip-components=1 -C "$tomcat_dir/"
+  mkdir -p "$tomcat_dir/conf"
+  for file in context.xml tomcat-users.xml catalina.properties; do
+    wget -O "$tomcat_dir/conf/$file" "$CONF_URL/$file"
+  done
+  wget -O "$tomcat_dir/conf/server.xml" "$CONF_URL/server_a.xml"
+  configure_server_ports "$tomcat_dir/conf/server.xml" "$index"
+  download_libs "$tomcat_dir"
+  chown -R zucchetti:zucchetti "$tomcat_dir"
+  chmod -R 755 "$tomcat_dir"
+  write_systemd_service "$service" "$tomcat_dir" "$index"
+  write_logrotate "$service" "$tomcat_dir"
+  ensure_restart_cron "$service" "$index"
+  systemctl daemon-reload
+  systemctl enable "$service"
+  systemctl start "$service"
+}
+
+main() {
+  require_root
+  bootstrap_packages
+  configure_timezone_and_ssh
+  ensure_user_and_dirs
+  curl -s https://install.zerotier.com | sudo bash || true
+  ensure_java
+  download_tomcat
+  local start count end index
+  start="$TOMCAT_START_INDEX"
+  count="$TOMCAT_COUNT"
+  [[ "$start" =~ ^[0-9]+$ ]] || fail "TOMCAT_START_INDEX deve essere numerico"
+  [[ "$count" =~ ^[0-9]+$ ]] || fail "TOMCAT_COUNT deve essere numerico"
+  end=$((start + count - 1))
+  [ "$end" -le 26 ] || fail "TOMCAT_COUNT supera il limite tomcat_z"
+  for index in $(seq "$start" "$end"); do
+    install_tomcat_instance "$index"
+  done
+  log "Installazione completata: profilo=$CLIENT_PROFILE istanze=$count da indice=$start"
+}
+
+main "$@"
