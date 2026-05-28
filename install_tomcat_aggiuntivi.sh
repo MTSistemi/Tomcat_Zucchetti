@@ -75,7 +75,22 @@ bootstrap_packages() {
     apt upgrade -y
     apt dist-upgrade -y
   fi
-  apt install -y curl net-tools wget gnupg2 sudo rsync apt-transport-https ca-certificates software-properties-common locate libncurses5-dev libsasl2-dev libssl-dev jq cron tzdata openssh-server fontconfig
+  # Installa solo i pacchetti effettivamente disponibili nella distribuzione
+  # corrente: alcuni nomi storici (es. software-properties-common) non esistono
+  # piu' su Debian 13 (trixie) e con "set -e" farebbero fallire l'intero deploy.
+  local base_packages="curl net-tools wget gnupg2 sudo rsync apt-transport-https ca-certificates software-properties-common locate libncurses5-dev libsasl2-dev libssl-dev jq cron tzdata openssh-server fontconfig"
+  local to_install=""
+  local skipped=""
+  for pkg in $base_packages; do
+    if apt-cache show "$pkg" >/dev/null 2>&1; then
+      to_install="$to_install $pkg"
+    else
+      skipped="$skipped $pkg"
+    fi
+  done
+  [ -n "$skipped" ] && log "Pacchetti non disponibili in questa distribuzione, ignorati:$skipped"
+  # shellcheck disable=SC2086
+  apt install -y $to_install
   apt-add-repository contrib non-free -y >/dev/null 2>&1 || true
   apt update -y
   echo 'msttcorefonts msttcorefonts/accepted-mscorefonts-eula select true' | debconf-set-selections >/dev/null 2>&1 || true
