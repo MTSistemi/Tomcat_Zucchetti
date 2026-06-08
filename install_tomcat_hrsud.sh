@@ -78,7 +78,7 @@ bootstrap_packages() {
   # Installa solo i pacchetti effettivamente disponibili nella distribuzione
   # corrente: alcuni nomi storici (es. software-properties-common) non esistono
   # piu' su Debian 13 (trixie) e con "set -e" farebbero fallire l'intero deploy.
-  local base_packages="curl net-tools wget gnupg2 sudo rsync apt-transport-https ca-certificates software-properties-common locate libncurses5-dev libsasl2-dev libssl-dev jq cron tzdata openssh-server fontconfig"
+  local base_packages="curl net-tools ncdu wget gnupg2 sudo rsync apt-transport-https ca-certificates software-properties-common locate libncurses5-dev libsasl2-dev libssl-dev jq cron tzdata openssh-server fontconfig"
   local to_install=""
   local skipped=""
   for pkg in $base_packages; do
