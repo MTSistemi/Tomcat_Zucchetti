@@ -256,7 +256,7 @@ EOS
   chmod 750 "$RESTART_SCRIPT"
   # Rimuove eventuali vecchie righe per-servizio e imposta un'unica esecuzione notturna
   sed -i '\#systemctl restart tomcat_#d' /etc/crontab 2>/dev/null || true
-  local line="30 1 * * * root $RESTART_SCRIPT"
+  local line="0 5 * * * root $RESTART_SCRIPT"
   grep -Fqx "$line" /etc/crontab || echo "$line" >> /etc/crontab
 }
 
