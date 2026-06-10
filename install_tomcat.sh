@@ -218,12 +218,45 @@ WantedBy=multi-user.target
 EOF
 }
 
-ensure_restart_cron() {
-  local service="$1" index="$2"
-  local total_minutes=$(((index - 1) * 10))
-  local hour=$((1 + total_minutes / 60))
-  local minute=$((total_minutes % 60))
-  local line="$minute $hour * * * root systemctl restart $service"
+RESTART_SCRIPT="/usr/local/sbin/tomcat-zucchetti-restart-all.sh"
+
+# Riavvio sequenziale di TUTTI i Tomcat: stop di tutti, poi avvio in ordine
+# (tomcat_a, tomcat_b, ...) attendendo che le webapp di ciascuno siano online
+# (marker "Server startup in" in catalina.out) prima di avviare il successivo.
+# Pianificato una sola volta in /etc/crontab.
+setup_sequential_restart() {
+  cat > "$RESTART_SCRIPT" <<'EOS'
+#!/bin/bash
+# Riavvio sequenziale dei Tomcat Zucchetti (stop di tutti, poi start ordinato
+# attendendo che tutte le webapp del precedente siano online).
+LOG=/var/log/tomcat-zucchetti-restart.log
+exec >>"$LOG" 2>&1
+echo "=== $(date '+%F %T') riavvio sequenziale Tomcat ==="
+services=$(systemctl list-unit-files 'tomcat_*.service' --no-legend 2>/dev/null | awk '{print $1}' | sed 's/\.service$//' | sort)
+[ -n "$services" ] || { echo "nessun servizio tomcat_* trovato"; exit 0; }
+for s in $services; do echo "stop $s"; systemctl stop "$s" || true; done
+sleep 5
+for s in $services; do
+  dir=$(systemctl show -p Environment "$s" 2>/dev/null | tr ' ' '\n' | sed -n 's/^CATALINA_HOME=//p')
+  log="$dir/logs/catalina.out"
+  off=$( [ -n "$dir" ] && [ -f "$log" ] && wc -c < "$log" || echo 0 )
+  echo "start $s (dir=${dir:-?})"
+  systemctl start "$s"
+  if [ -z "$dir" ]; then sleep 60; continue; fi
+  online=0
+  for i in $(seq 1 120); do
+    sleep 5
+    systemctl is-active --quiet "$s" || { echo "  $s non attivo"; break; }
+    if tail -c +$((off+1)) "$log" 2>/dev/null | grep -q "Server startup in"; then online=1; break; fi
+  done
+  [ "$online" = 1 ] && echo "  $s: tutte le webapp online" || echo "  $s: timeout (proseguo col successivo)"
+done
+echo "=== fine ==="
+EOS
+  chmod 750 "$RESTART_SCRIPT"
+  # Rimuove eventuali vecchie righe per-servizio e imposta un'unica esecuzione notturna
+  sed -i '\#systemctl restart tomcat_#d' /etc/crontab 2>/dev/null || true
+  local line="30 1 * * * root $RESTART_SCRIPT"
   grep -Fqx "$line" /etc/crontab || echo "$line" >> /etc/crontab
 }
 
@@ -273,7 +306,6 @@ install_tomcat_instance() {
   chmod -R 755 "$tomcat_dir"
   write_systemd_service "$service" "$tomcat_dir" "$index"
   write_logrotate "$service" "$tomcat_dir"
-  ensure_restart_cron "$service" "$index"
   systemctl daemon-reload
   systemctl enable "$service"
   systemctl start "$service"
@@ -297,6 +329,7 @@ main() {
   for index in $(seq "$start" "$end"); do
     install_tomcat_instance "$index"
   done
+  setup_sequential_restart
   log "Installazione completata: profilo=$CLIENT_PROFILE istanze=$count da indice=$start"
 }
 
